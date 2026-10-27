@@ -68,6 +68,12 @@
 // priority over these numbers.
 static const uint16_t TOUCH_CAL_DATA[5] = { 0, 0, 0, 0, 0 };
 
+// 1 = touch screen used (on-screen buttons, calibration).
+// 0 = no touch: no calibration at start-up, no on-screen buttons; the
+//     player shows the track and volume in a bigger layout, and the
+//     physical button + the phone do everything.
+#define USE_TOUCH 0
+
 // What to do with the panel before deep sleep.
 //   1 = DISPOFF (0x28) + SLPIN (0x10), as specified. Lowest panel current,
 //       but with the backlight hard-wired on, most ILI9341 panels then
@@ -156,6 +162,7 @@ struct Layout {
   Rect safe;
   Rect status, title, artist, album;
   Rect volBar;
+  Rect hint;   // help line (no-touch layout only)
   Rect btn[BTN_COUNT];
 };
 
@@ -702,6 +709,17 @@ void computeLayout() {
   const int PAD = 6;
   const int x = L.safe.x + PAD, w = L.safe.w - 2 * PAD, y = L.safe.y;
 
+#if !USE_TOUCH
+  // No buttons to draw: the same regions, spread over the whole screen
+  L.status = { (int16_t)x, (int16_t)(y + 10),  (int16_t)w, 18 };
+  L.title  = { (int16_t)x, (int16_t)(y + 52),  (int16_t)w, 28 };
+  L.artist = { (int16_t)x, (int16_t)(y + 94),  (int16_t)w, 18 };
+  L.album  = { (int16_t)x, (int16_t)(y + 116), (int16_t)w, 18 };
+  L.volBar = { (int16_t)x, (int16_t)(y + 150), (int16_t)w, 40 };
+  L.hint   = { (int16_t)x, (int16_t)(L.safe.y + L.safe.h - 26), (int16_t)w, 18 };
+  return;
+#endif
+
   L.status = { (int16_t)x, (int16_t)(y + 4),  (int16_t)w, 18 };
   L.title  = { (int16_t)x, (int16_t)(y + 28), (int16_t)w, 28 };
   L.artist = { (int16_t)x, (int16_t)(y + 60), (int16_t)w, 18 };
@@ -902,7 +920,13 @@ static void enterScreen(Screen s) {
     g_nextDotsAt = 0;
   } else if (s == SCR_PLAYER) {
     tft.fillScreen(COL_BG);
+#if USE_TOUCH
     for (int i = 0; i < BTN_COUNT; i++) drawButton((ButtonId)i, false);
+#else
+    tft.setTextDatum(TC_DATUM);
+    tft.setTextColor(COL_FAINT, COL_BG);
+    tft.drawString("Button: play / pause    Hold 2 s: sleep", L.hint.x + L.hint.w / 2, L.hint.y, 2);
+#endif
     g_dirty = D_ALL;
   }
 }
@@ -946,7 +970,7 @@ void updateUi(uint32_t now) {
   else if (g_dirty & D_ARTIST)  { g_dirty &= ~D_ARTIST;  drawTextLine(L.artist, g_shownArtist, "", COL_DIM); }
   else if (g_dirty & D_ALBUM)   { g_dirty &= ~D_ALBUM;   drawTextLine(L.album,  g_shownAlbum,  "", COL_FAINT); }
   else if (g_dirty & D_VOLUME)  { g_dirty &= ~D_VOLUME;  drawVolume(); }
-  else if (g_dirty & D_PLAYBTN) { g_dirty &= ~D_PLAYBTN; drawButton(BTN_PLAY, g_touch.active == BTN_PLAY); }
+  else if (g_dirty & D_PLAYBTN) { g_dirty &= ~D_PLAYBTN; if (USE_TOUCH) drawButton(BTN_PLAY, g_touch.active == BTN_PLAY); }
   else if (g_titleScrolling && (int32_t)(now - g_nextScrollAt) >= 0) {
     g_scrollX += 2;
     g_nextScrollAt = now + SCROLL_STEP_MS;
@@ -1179,9 +1203,9 @@ void setup() {
   // is no calibration at all yet.
   // Skipping (button) keeps any older calibration; with none at all the
   // jukebox still starts, touch is just ignored.
-  bool haveCal = loadTouchCal();
+  bool haveCal = USE_TOUCH && loadTouchCal();
   const bool forced = !wokeByButton && g_btn.stable == LOW;
-  if (!haveCal || forced) {
+  if (USE_TOUCH && (!haveCal || forced)) {
     if (runTouchCalibration(!forced)) haveCal = true;
     g_btn.stable = g_btn.lastRaw = digitalRead(PIN_BUTTON);
     g_btn.ignoreUntilRelease = (g_btn.stable == LOW);  // the skip press must not count

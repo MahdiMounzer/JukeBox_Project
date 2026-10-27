@@ -38,6 +38,8 @@ Open `Jukebox/Jukebox.ino` (the folder name has to match the sketch name) and up
 
 ## 2. Touch calibration and the hidden 2 mm strip
 
+> **Touch is currently switched off** (`#define USE_TOUCH 0` in `Jukebox.ino`): no calibration at start-up and no on-screen buttons. The physical button does play/pause and sleep, the phone does everything else. Set it to `1` to bring the touch screen back; this section then applies.
+
 The cabinet frame covers about 2 mm of the screen, which is about 11 px (the panel has about 5.6 px per mm). This matters for calibration in two ways.
 
 **Problem with the stock example:** TFT_eSPI's `Touch_calibrate` puts its arrows in the four very corners, and it assumes you touched exactly pixel 0 / pixel 319. If two of those corners are under the frame, you either can't reach them or you press about 11 px too far in. Every touch on that axis then comes out shifted.
