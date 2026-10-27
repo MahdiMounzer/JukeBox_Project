@@ -49,9 +49,11 @@ Calibration describes the touch glass, not the cabinet, so you have two ways aro
 The firmware has its own calibration mode. Its targets sit 30 px inside the visible area, and it extrapolates out to the edges, so nobody has to touch the frame.
 
 1. Power off. **Hold the button and power on** (keep holding until the edge ruler appears).
-   The mode also starts on its own the first time, when no calibration exists yet.
+   The mode also starts on its own when no calibration exists yet (first start, or after changing `SCREEN_ROTATION`). Started that way, it gives up after 20 s without a tap, so the jukebox always starts.
    It doesn't start when you wake the jukebox from sleep with the button.
+   **Pressing the button skips calibration** at any step. The jukebox then runs with the previous calibration, or with touch disabled if there is none (music, play/pause and sleep still work with the button and the phone).
 2. **Edge ruler:** concentric coloured frames, 4 px apart. On each edge, note the outermost colour you can fully see. For example, if on the left you can see green (12 px) but not yellow, use `SAFE_LEFT 12`. Tap to continue.
+   The orange line under it shows the touch controller's live readings: not touched = `Z=0`, `IRQ=high`; pressed = `Z` of several hundred, `IRQ=LOW`, and `X`/`Y` that change as the finger moves.
 3. Touch each **+** and hold it until it turns green (4 targets).
 4. **Test screen:** draw with your finger. The dots should land under your finger, including near the frame. Press the button to finish.
 
@@ -84,7 +86,7 @@ Keep Serial Monitor open at 115200 for every step.
 
 1. **Screen.** Power on. You should see the name splash, then "Waiting for connection" with three animated dots.
    * Check that nothing important is cut off at the edges. If it is, run the edge ruler (section 2) and adjust `SAFE_*`.
-   * If the image is upside down, set `SCREEN_ROTATION 3`.
+   * If the image is upside down, switch `SCREEN_ROTATION` between 1 and 3. The next start asks for a new calibration by itself.
 2. **Touch.** Calibrate (section 2). On the test screen, draw along all four edges and the centre. The dots must follow your finger.
 3. **Bluetooth pairing.** On the phone, pair with "Narod's Jukebox".
    * The screen switches to the player and shows "Connected" plus the phone's name.
@@ -112,7 +114,7 @@ Keep Serial Monitor open at 115200 for every step.
 | Red and blue swapped / colours inverted | Uncomment `TFT_RGB_ORDER TFT_BGR` / `TFT_INVERSION_ON` in `User_Setup.h`. |
 | **Touch mirrored** (left↔right or up↔down) | Calibration was done in a different rotation than `SCREEN_ROTATION`, or the stock example ran with a different `setRotation`. Recalibrate. |
 | **Touch offset** a fixed amount on one side | Corners were pressed inside the frame with the stock example. Use the built-in calibration. |
-| Touch does nothing / jumps randomly | Raw readings are garbage. Usually the display's MISO (SDO) doesn't release the shared bus. The firmware never reads from the display, so lifting the display module's SDO pin from the MISO line fixes it. Also check TOUCH_CS (21) and T_IRQ (27). |
+| Touch does nothing / jumps randomly | Check the live readings on the edge ruler (hold the button at power-on). `Z` stuck at 0 while pressing = the touch chip doesn't answer: check T_CLK→18, T_CS→21, T_DIN→23, T_DO→19, and that nothing else drives MISO. `IRQ` never goes LOW = T_IRQ→27. Raw readings are garbage: Usually the display's MISO (SDO) doesn't release the shared bus. The firmware never reads from the display, so lifting the display module's SDO pin from the MISO line fixes it. Also check TOUCH_CS (21) and T_IRQ (27). |
 | **One speaker silent** | That amp gets no audio or no power. Check its 5 V and GND, and BCLK/LRC/DIN at that amp. Check its SD resistor: SD pulled fully to GND = shutdown. A wrong value can also put both amps on the same channel, so the L/R test plays from both. |
 | Both speakers play the same thing | Both SD resistors select the same channel (or both select "(L+R)/2"). Check the 220k and 470k values. |
 | **Crackling** / distortion that grows with volume | The 5 V boost sags: two amps at 9 dB gain can pull >1 A peaks. Check with lower volume. If it's clean at low volume, it's power (thicker wires, bulk capacitor near the amps, weak/old cells). |

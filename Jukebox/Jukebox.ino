@@ -47,8 +47,9 @@
 #define DEVICE_NAME "Narod's Jukebox"
 
 // 1 or 3 are the two landscape orientations. If the picture is upside
-// down in the cabinet, switch to the other one AND recalibrate the touch.
-#define SCREEN_ROTATION 1
+// down in the cabinet, switch to the other one: the touch calibration is
+// saved together with the rotation, so a change triggers a new one.
+#define SCREEN_ROTATION 3
 
 // Pixels hidden behind the cabinet frame, per edge, as the viewer sees
 // the screen (after rotation). The panel is about 5.6 px per mm, so the
@@ -177,7 +178,7 @@ void onSampleRate(uint16_t rate);
 void cmdTask(void *arg);
 bool postCmd(CmdType type, uint8_t value);
 bool loadTouchCal();
-void runTouchCalibration();
+bool runTouchCalibration(bool canTimeOut);
 void computeLayout();
 void pollButton(uint32_t now);
 void pollTouch(uint32_t now);
@@ -203,6 +204,7 @@ static uint32_t     g_snapVer = 0xFFFFFFFF;
 
 static QueueHandle_t g_cmdQueue = nullptr;
 static uint16_t      g_cal[5];
+static bool          g_touchOk = false;  // false = no calibration: touch ignored, button still works
 static Layout        L;
 
 // ---- UI state (loop() only, no locking needed) ----
@@ -437,7 +439,9 @@ bool loadTouchCal() {
   Preferences prefs;
   if (prefs.begin("jukebox", true)) {
     uint16_t c[5];
-    bool ok = prefs.getBytes("tcal", c, sizeof c) == sizeof c && calLooksValid(c);
+    // A calibration only holds for the rotation it was made in
+    bool ok = prefs.getBytes("tcal", c, sizeof c) == sizeof c && calLooksValid(c) &&
+              prefs.getUChar("trot", 0xFF) == SCREEN_ROTATION;
     prefs.end();
     if (ok) { memcpy(g_cal, c, sizeof c); Serial.println("[touch] using calibration saved on device"); return true; }
   }
@@ -451,7 +455,11 @@ bool loadTouchCal() {
 
 static void saveTouchCal() {
   Preferences prefs;
-  if (prefs.begin("jukebox", false)) { prefs.putBytes("tcal", g_cal, sizeof g_cal); prefs.end(); }
+  if (prefs.begin("jukebox", false)) {
+    prefs.putBytes("tcal", g_cal, sizeof g_cal);
+    prefs.putUChar("trot", SCREEN_ROTATION);
+    prefs.end();
+  }
 }
 
 // Same maths as TFT_eSPI::convertRawXY(), but signed and clamped, so a
@@ -470,9 +478,45 @@ static void rawToScreen(uint16_t rx, uint16_t ry, int16_t &sx, int16_t &sy) {
 
 static bool touchPressedRaw() { return tft.getTouchRawZ() > TOUCH_Z_THRESHOLD; }
 
-static void waitTouchRelease() {
+// The physical button can always get out of calibration, so a broken or
+// disconnected touch panel never stops the jukebox from starting.
+// True once per new press (a button already held when calibration starts
+// doesn't count until it has been released).
+static bool g_calBtnWasDown = false;
+static bool calButtonClicked() {
+  bool down = digitalRead(PIN_BUTTON) == LOW;
+  bool clicked = down && !g_calBtnWasDown;
+  g_calBtnWasDown = down;
+  return clicked;
+}
+
+// Returns false if the button was pressed instead.
+static bool waitTouchRelease() {
   uint8_t up = 0;
-  while (up < 5) { up = touchPressedRaw() ? 0 : up + 1; delay(10); }
+  while (up < 5) {
+    if (calButtonClicked()) return false;
+    up = touchPressedRaw() ? 0 : up + 1;
+    delay(10);
+  }
+  return true;
+}
+
+// Live raw readings from the touch controller, drawn on the screen: the
+// only way to see them once the screen covers the USB port.
+// Not touched: Z = 0, IRQ high. Touched: Z of several hundred, IRQ LOW,
+// X/Y between ~200 and ~3900 and following the finger.
+static void drawTouchReadout(int y) {
+  uint16_t z = tft.getTouchRawZ();
+  uint16_t rx = 0, ry = 0;
+  tft.getTouchRaw(&rx, &ry);
+  char s[48];
+  snprintf(s, sizeof s, "Z=%u  X=%u  Y=%u  IRQ=%s", z, rx, ry,
+           digitalRead(PIN_TOUCH_IRQ) == LOW ? "LOW" : "high");
+  tft.setTextDatum(TC_DATUM);
+  tft.setTextColor(COL_ACCENT, COL_BG);
+  tft.setTextPadding(250);
+  tft.drawString(s, tft.width() / 2, y, 2);
+  tft.setTextPadding(0);
 }
 
 static void drawTarget(int x, int y, uint16_t col) {
@@ -482,13 +526,15 @@ static void drawTarget(int x, int y, uint16_t col) {
 }
 
 // Waits for a steady press on the target and returns the averaged raw value.
-static void sampleTarget(int x, int y, uint16_t &outX, uint16_t &outY) {
+// Returns false if the button was pressed instead (calibration skipped).
+static bool sampleTarget(int x, int y, uint16_t &outX, uint16_t &outY) {
   drawTarget(x, y, TFT_WHITE);
-  waitTouchRelease();
+  if (!waitTouchRelease()) return false;
   uint32_t sx = 0, sy = 0;
   int n = 0;
   while (n < 16) {
     uint16_t rx, ry;
+    if (calButtonClicked()) return false;
     if (touchPressedRaw()) {
       if (n == 0) delay(60);  // let the pressure settle before the first sample
       tft.getTouchRaw(&rx, &ry);
@@ -501,10 +547,11 @@ static void sampleTarget(int x, int y, uint16_t &outX, uint16_t &outY) {
     }
   }
   drawTarget(x, y, TFT_GREEN);
-  waitTouchRelease();
+  if (!waitTouchRelease()) return false;
   drawTarget(x, y, COL_BG);
   outX = sx / 16;
   outY = sy / 16;
+  return true;
 }
 
 // Four targets at (xl,yt) (xl,yb) (xr,yt) (xr,yb) - well inside the
@@ -540,8 +587,10 @@ static bool computeCal(const uint16_t *rx, const uint16_t *ry,
 }
 
 // Concentric frames 4 px apart: the outermost colour you can fully see on
-// an edge tells you that edge's SAFE_ value.
-static void showEdgeRuler() {
+// an edge tells you that edge's SAFE_ value. Also shows the live touch
+// readings. Returns true on a tap (go on with calibration), false if the
+// button was pressed or, when canTimeOut, after 20 s without a tap.
+static bool showEdgeRuler(bool canTimeOut) {
   static const uint16_t cols[] = { TFT_RED, TFT_ORANGE, TFT_YELLOW, TFT_GREEN, TFT_CYAN, TFT_BLUE, TFT_MAGENTA };
   static const char *names[]   = { "red", "orange", "yellow", "green", "cyan", "blue", "magenta" };
   const int W = tft.width(), H = tft.height();
@@ -549,26 +598,43 @@ static void showEdgeRuler() {
   for (int i = 0; i < 7; i++) tft.drawRect(i * 4, i * 4, W - i * 8, H - i * 8, cols[i]);
   tft.setTextDatum(TC_DATUM);
   tft.setTextColor(COL_TEXT, COL_BG);
-  tft.drawString("EDGE RULER", W / 2, 40, 4);
+  tft.drawString("EDGE RULER", W / 2, 34, 4);
   tft.setTextColor(COL_DIM, COL_BG);
-  tft.drawString("Outermost line you can see on each edge:", W / 2, 72, 2);
+  tft.drawString("Outermost line visible on each edge:", W / 2, 62, 2);
   char line[40];
   for (int i = 0; i < 7; i++) {
     snprintf(line, sizeof line, "%s = %d px", names[i], i * 4);
     tft.setTextColor(cols[i], COL_BG);
-    tft.drawString(line, W / 2, 92 + i * 16, 2);
+    tft.drawString(line, W / 2, 80 + i * 14, 2);
   }
   tft.setTextColor(COL_TEXT, COL_BG);
-  tft.drawString("Tap anywhere to continue", W / 2, 208, 2);
-  waitTouchRelease();
-  while (!touchPressedRaw()) delay(10);
-  waitTouchRelease();
+  tft.drawString("Tap = continue   Button = skip", W / 2, 181, 2);
+
+  g_calBtnWasDown = digitalRead(PIN_BUTTON) == LOW;
+  const uint32_t t0 = millis();
+  uint32_t nextDraw = 0;
+  bool seenRelease = false;  // a panel stuck at "pressed" must not count as a tap
+  for (;;) {
+    uint32_t now = millis();
+    if ((int32_t)(now - nextDraw) >= 0) { nextDraw = now + 150; drawTouchReadout(197); }
+    if (!touchPressedRaw()) seenRelease = true;
+    else if (seenRelease) return waitTouchRelease();
+    if (calButtonClicked()) return false;
+    if (canTimeOut && now - t0 > 20000) return false;
+    delay(10);
+  }
 }
 
 // Blocking on purpose: it only runs from setup(), before Bluetooth starts.
-void runTouchCalibration() {
+// canTimeOut: true when it started by itself (no calibration yet), so an
+// unattended jukebox with a dead touch panel still starts after 20 s.
+// Returns true if a new calibration was made and saved.
+bool runTouchCalibration(bool canTimeOut) {
   Serial.println("[touch] calibration mode");
-  showEdgeRuler();
+  if (!showEdgeRuler(canTimeOut)) {
+    Serial.println("[touch] calibration skipped");
+    return false;
+  }
 
   const int W = tft.width(), H = tft.height();
   const int INSET = 30;
@@ -582,8 +648,15 @@ void runTouchCalibration() {
     tft.setTextColor(COL_TEXT, COL_BG);
     tft.drawString("Touch each + and hold", W / 2, H / 2 - 10, 2);
     tft.drawString("until it turns green", W / 2, H / 2 + 10, 2);
+    tft.setTextColor(COL_FAINT, COL_BG);
+    tft.drawString("Button = skip", W / 2, H / 2 + 34, 2);
     uint16_t rx[4], ry[4];
-    for (int i = 0; i < 4; i++) sampleTarget(tx[i], ty[i], rx[i], ry[i]);
+    for (int i = 0; i < 4; i++) {
+      if (!sampleTarget(tx[i], ty[i], rx[i], ry[i])) {
+        Serial.println("[touch] calibration skipped");
+        return false;
+      }
+    }
     uint16_t c[5];
     if (computeCal(rx, ry, xl, xr, yt, yb, c)) { memcpy(g_cal, c, sizeof c); break; }
     tft.fillScreen(COL_BG);
@@ -616,6 +689,7 @@ void runTouchCalibration() {
     delay(5);
   }
   while (digitalRead(PIN_BUTTON) == LOW) delay(10);
+  return true;
 }
 
 // ==========================================================================
@@ -914,6 +988,7 @@ static void onButtonAction(ButtonId id) {
 // Non-blocking: one quick SPI read every 15 ms, and only when the XPT2046
 // pulls T_IRQ low. Two matching samples = press, two empty = release.
 void pollTouch(uint32_t now) {
+  if (!g_touchOk) return;
   if ((int32_t)(now - g_touch.nextPoll) < 0) return;
   g_touch.nextPoll = now + TOUCH_POLL_MS;
 
@@ -1102,13 +1177,18 @@ void setup() {
 
   // Touch calibration: on a cold boot with the button held, or if there
   // is no calibration at all yet.
+  // Skipping (button) keeps any older calibration; with none at all the
+  // jukebox still starts, touch is just ignored.
   bool haveCal = loadTouchCal();
-  if (!haveCal || (!wokeByButton && g_btn.stable == LOW)) {
-    runTouchCalibration();
+  const bool forced = !wokeByButton && g_btn.stable == LOW;
+  if (!haveCal || forced) {
+    if (runTouchCalibration(!forced)) haveCal = true;
     g_btn.stable = g_btn.lastRaw = digitalRead(PIN_BUTTON);
-    g_btn.ignoreUntilRelease = false;
+    g_btn.ignoreUntilRelease = (g_btn.stable == LOW);  // the skip press must not count
   }
-  Serial.printf("[touch] cal = { %u, %u, %u, %u, %u }\n", g_cal[0], g_cal[1], g_cal[2], g_cal[3], g_cal[4]);
+  g_touchOk = haveCal;
+  if (g_touchOk) Serial.printf("[touch] cal = { %u, %u, %u, %u, %u }\n", g_cal[0], g_cal[1], g_cal[2], g_cal[3], g_cal[4]);
+  else Serial.println("[touch] no calibration: touch disabled");
 
   // Splash while Bluetooth starts
   tft.fillScreen(COL_BG);
