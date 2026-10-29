@@ -96,6 +96,7 @@ static const int PIN_TOUCH_IRQ = 27;  // XPT2046 PENIRQ, active LOW
 // ==========================================================================
 static const uint32_t BTN_DEBOUNCE_MS     = 25;    // RC does most of the work
 static const uint32_t BTN_LONG_MS         = 2000;  // hold time for sleep
+static const uint32_t BTN_MULTI_GAP_MS    = 400;   // max pause inside a double/triple press
 static const uint32_t TOUCH_POLL_MS       = 15;
 static const uint16_t TOUCH_Z_THRESHOLD   = 400;   // XPT2046 pressure threshold
 static const uint32_t VOL_REPEAT_DELAY_MS = 500;   // hold +/- to repeat
@@ -235,6 +236,8 @@ static struct {
   bool     stable = HIGH, lastRaw = HIGH;
   uint32_t changedAt = 0, pressedAt = 0;
   bool     longFired = false, ignoreUntilRelease = false;
+  uint8_t  clicks = 0;          // short presses in the current series
+  uint32_t releasedAt = 0;
 } g_btn;
 
 // ---- Touch ----
@@ -508,21 +511,46 @@ static bool waitTouchRelease() {
   return true;
 }
 
-// Live raw readings from the touch controller, drawn on the screen: the
-// only way to see them once the screen covers the USB port.
-// Not touched: Z = 0, IRQ high. Touched: Z of several hundred, IRQ LOW,
-// X/Y between ~200 and ~3900 and following the finger.
+// Reads one XPT2046 value without going through TFT_eSPI, at 1 MHz.
+// cmd 0xD0 = X, 0x90 = Y, 0xB0 = pressure Z1. Result 0..4095.
+static uint16_t directTouchRead(uint8_t cmd) {
+  SPIClass &spi = tft.getSPIinstance();
+  spi.beginTransaction(SPISettings(1000000, MSBFIRST, SPI_MODE0));
+  // TFT_eSPI leaves the SPI unit in write-only mode after drawing:
+  // switch MISO sampling back on (what TFT_eSPI does before a touch read)
+  *(volatile uint32_t *)(SPI_USER_REG(SPI_PORT)) = SPI_USR_MOSI | SPI_USR_MISO | SPI_DOUTDIN;
+  digitalWrite(TOUCH_CS, LOW);
+  spi.transfer(cmd);
+  uint16_t v = spi.transfer16(0) >> 3;
+  digitalWrite(TOUCH_CS, HIGH);
+  spi.endTransaction();
+  return v & 0x0FFF;
+}
+
+// Live readings from the touch controller, drawn on the screen: the only
+// way to see them once the screen covers the USB port. Shown on the edge
+// ruler, with a weak pull-down on MISO (see showEdgeRuler).
+//   line 1 "lib": through TFT_eSPI. Not touched: Z=0, IRQ high. Touched:
+//                 Z of several hundred, IRQ LOW, X/Y ~200..3900 that
+//                 follow the finger.
+//   line 2 "own": same chip read by this sketch, slower, 0..4095.
+// If both stay at the maximum (8191 / 4095): MISO isn't being read at all.
+// If both drop to 0 with the pull-down: nothing drives MISO, the touch
+// chip doesn't answer (T_CS / T_CLK / T_DIN / T_DO side).
 static void drawTouchReadout(int y) {
   uint16_t z = tft.getTouchRawZ();
   uint16_t rx = 0, ry = 0;
   tft.getTouchRaw(&rx, &ry);
-  char s[48];
-  snprintf(s, sizeof s, "Z=%u  X=%u  Y=%u  IRQ=%s", z, rx, ry,
+  char s[56];
+  snprintf(s, sizeof s, "lib Z=%u X=%u Y=%u IRQ=%s", z, rx, ry,
            digitalRead(PIN_TOUCH_IRQ) == LOW ? "LOW" : "high");
   tft.setTextDatum(TC_DATUM);
   tft.setTextColor(COL_ACCENT, COL_BG);
-  tft.setTextPadding(250);
+  tft.setTextPadding(260);  // stays clear of the ruler frames
   tft.drawString(s, tft.width() / 2, y, 2);
+  snprintf(s, sizeof s, "own X=%u Y=%u Z1=%u", directTouchRead(0xD0), directTouchRead(0x90), directTouchRead(0xB0));
+  tft.setTextColor(COL_CONNECTED, COL_BG);
+  tft.drawString(s, tft.width() / 2, y + 18, 2);
   tft.setTextPadding(0);
 }
 
@@ -605,31 +633,37 @@ static bool showEdgeRuler(bool canTimeOut) {
   for (int i = 0; i < 7; i++) tft.drawRect(i * 4, i * 4, W - i * 8, H - i * 8, cols[i]);
   tft.setTextDatum(TC_DATUM);
   tft.setTextColor(COL_TEXT, COL_BG);
-  tft.drawString("EDGE RULER", W / 2, 34, 4);
+  tft.drawString("EDGE RULER", W / 2, 32, 4);
   tft.setTextColor(COL_DIM, COL_BG);
-  tft.drawString("Outermost line visible on each edge:", W / 2, 62, 2);
+  tft.drawString("Outermost line visible on each edge:", W / 2, 60, 2);
   char line[40];
-  for (int i = 0; i < 7; i++) {
+  for (int i = 0; i < 7; i++) {  // two columns: 4 on the left, 3 on the right
     snprintf(line, sizeof line, "%s = %d px", names[i], i * 4);
     tft.setTextColor(cols[i], COL_BG);
-    tft.drawString(line, W / 2, 80 + i * 14, 2);
+    tft.drawString(line, W / 2 + (i < 4 ? -64 : 64), 80 + (i % 4) * 16, 2);
   }
   tft.setTextColor(COL_TEXT, COL_BG);
-  tft.drawString("Tap = continue   Button = skip", W / 2, 181, 2);
+  tft.drawString("Tap = continue   Button = skip", W / 2, 148, 2);
 
+  // Weak pull-down on MISO while this screen is up: an undriven line then
+  // reads 0 instead of floating (diagnostic only, removed on exit).
+  gpio_pulldown_en((gpio_num_t)TFT_MISO);
   g_calBtnWasDown = digitalRead(PIN_BUTTON) == LOW;
   const uint32_t t0 = millis();
   uint32_t nextDraw = 0;
   bool seenRelease = false;  // a panel stuck at "pressed" must not count as a tap
+  bool tapped = false;
   for (;;) {
     uint32_t now = millis();
-    if ((int32_t)(now - nextDraw) >= 0) { nextDraw = now + 150; drawTouchReadout(197); }
+    if ((int32_t)(now - nextDraw) >= 0) { nextDraw = now + 150; drawTouchReadout(168); }
     if (!touchPressedRaw()) seenRelease = true;
-    else if (seenRelease) return waitTouchRelease();
-    if (calButtonClicked()) return false;
-    if (canTimeOut && now - t0 > 20000) return false;
+    else if (seenRelease) { tapped = waitTouchRelease(); break; }
+    if (calButtonClicked()) break;
+    if (canTimeOut && now - t0 > 20000) break;
     delay(10);
   }
+  gpio_pulldown_dis((gpio_num_t)TFT_MISO);
+  return tapped;
 }
 
 // Blocking on purpose: it only runs from setup(), before Bluetooth starts.
@@ -712,11 +746,11 @@ void computeLayout() {
 #if !USE_TOUCH
   // No buttons to draw: the same regions, spread over the whole screen
   L.status = { (int16_t)x, (int16_t)(y + 10),  (int16_t)w, 18 };
-  L.title  = { (int16_t)x, (int16_t)(y + 52),  (int16_t)w, 28 };
-  L.artist = { (int16_t)x, (int16_t)(y + 94),  (int16_t)w, 18 };
-  L.album  = { (int16_t)x, (int16_t)(y + 116), (int16_t)w, 18 };
-  L.volBar = { (int16_t)x, (int16_t)(y + 150), (int16_t)w, 40 };
-  L.hint   = { (int16_t)x, (int16_t)(L.safe.y + L.safe.h - 26), (int16_t)w, 18 };
+  L.title  = { (int16_t)x, (int16_t)(y + 46),  (int16_t)w, 28 };
+  L.artist = { (int16_t)x, (int16_t)(y + 84),  (int16_t)w, 18 };
+  L.album  = { (int16_t)x, (int16_t)(y + 104), (int16_t)w, 18 };
+  L.volBar = { (int16_t)x, (int16_t)(y + 128), (int16_t)w, 36 };
+  L.hint   = { (int16_t)x, (int16_t)(L.safe.y + L.safe.h - 44), (int16_t)w, 36 };
   return;
 #endif
 
@@ -925,7 +959,8 @@ static void enterScreen(Screen s) {
 #else
     tft.setTextDatum(TC_DATUM);
     tft.setTextColor(COL_FAINT, COL_BG);
-    tft.drawString("Button: play / pause    Hold 2 s: sleep", L.hint.x + L.hint.w / 2, L.hint.y, 2);
+    tft.drawString("Press: play / pause     2 presses: next", L.hint.x + L.hint.w / 2, L.hint.y, 2);
+    tft.drawString("3 presses: previous     Hold 2 s: sleep", L.hint.x + L.hint.w / 2, L.hint.y + 18, 2);
 #endif
     g_dirty = D_ALL;
   }
@@ -1064,8 +1099,12 @@ void pollTouch(uint32_t now) {
 //  Input: physical button (GPIO 33)
 // ==========================================================================
 
-static void onShortPress() {
-  if (g_snap.connected) postCmd(g_snap.play == PS_PLAYING ? CMD_PAUSE : CMD_PLAY, 0);
+// 1 press = play/pause, 2 = next track, 3 or more = previous track
+static void onClicks(uint8_t n) {
+  if (!g_snap.connected) return;
+  if (n == 1)      postCmd(g_snap.play == PS_PLAYING ? CMD_PAUSE : CMD_PLAY, 0);
+  else if (n == 2) postCmd(CMD_NEXT, 0);
+  else             postCmd(CMD_PREV, 0);
 }
 
 static void onLongPress(uint32_t now) {
@@ -1094,13 +1133,22 @@ void pollButton(uint32_t now) {
     } else if (g_btn.ignoreUntilRelease) {
       g_btn.ignoreUntilRelease = false;  // that was the press that woke us
     } else if (!g_btn.longFired && g_sleep == SLEEP_NONE) {
-      onShortPress();
+      g_btn.clicks++;  // counted now, acted on once the series is over
+      g_btn.releasedAt = now;
     }
+  }
+
+  // The series is over once the button has stayed up for BTN_MULTI_GAP_MS
+  // (this is why a single press acts ~0.4 s after release)
+  if (g_btn.clicks && g_btn.stable == HIGH && now - g_btn.releasedAt >= BTN_MULTI_GAP_MS) {
+    onClicks(g_btn.clicks);
+    g_btn.clicks = 0;
   }
 
   if (g_btn.stable == LOW && !g_btn.longFired && !g_btn.ignoreUntilRelease &&
       g_sleep == SLEEP_NONE && now - g_btn.pressedAt >= BTN_LONG_MS) {
     g_btn.longFired = true;
+    g_btn.clicks = 0;  // press, press, hold = sleep, not next track
     onLongPress(now);
   }
 }
@@ -1210,6 +1258,15 @@ void setup() {
     g_btn.stable = g_btn.lastRaw = digitalRead(PIN_BUTTON);
     g_btn.ignoreUntilRelease = (g_btn.stable == LOW);  // the skip press must not count
   }
+#if !USE_TOUCH
+  // Touch off: holding the button at power-on still shows the edge ruler
+  // and the touch readings (for testing); the button leaves it.
+  if (forced) {
+    showEdgeRuler(false);
+    g_btn.stable = g_btn.lastRaw = digitalRead(PIN_BUTTON);
+    g_btn.ignoreUntilRelease = (g_btn.stable == LOW);
+  }
+#endif
   g_touchOk = haveCal;
   if (g_touchOk) Serial.printf("[touch] cal = { %u, %u, %u, %u, %u }\n", g_cal[0], g_cal[1], g_cal[2], g_cal[3], g_cal[4]);
   else Serial.println("[touch] no calibration: touch disabled");

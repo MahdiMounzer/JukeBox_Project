@@ -38,7 +38,9 @@ Open `Jukebox/Jukebox.ino` (the folder name has to match the sketch name) and up
 
 ## 2. Touch calibration and the hidden 2 mm strip
 
-> **Touch is currently switched off** (`#define USE_TOUCH 0` in `Jukebox.ino`): no calibration at start-up and no on-screen buttons. The physical button does play/pause and sleep, the phone does everything else. Set it to `1` to bring the touch screen back; this section then applies.
+> **Touch is currently switched off** (`#define USE_TOUCH 0` in `Jukebox.ino`): no calibration at start-up and no on-screen buttons. The physical button does everything: **1 press = play/pause, 2 quick presses = next track, 3 = previous, hold 2 s = sleep**. Volume comes from the phone. Set it to `1` to bring the touch screen back; this section then applies.
+>
+> Even with touch off, **holding the button at power-on** shows the edge ruler with two lines of live touch readings, then the button leaves it. With a weak pull-down on MISO during that screen: `lib` = read through TFT_eSPI, `own` = read by the sketch itself at 1 MHz. Both stuck at the maximum (8191 / 4095) = MISO isn't being read; both at 0 = nothing answers on MISO (touch chip side: T_CS, T_CLK, T_DIN, T_DO).
 
 The cabinet frame covers about 2 mm of the screen, which is about 11 px (the panel has about 5.6 px per mm). This matters for calibration in two ways.
 
@@ -102,7 +104,7 @@ Keep Serial Monitor open at 115200 for every step.
    * If they're swapped, the SD-pin resistors are on the opposite amps. Fix it in firmware by adding `a2dp_sink.set_swap_lr_channels(true);` before `a2dp_sink.start(...)`.
    * Turn the volume up to maximum with a bass-heavy track to check that the boost converter holds (see "crackling" below).
 5. **Button, sleep and wake.**
-   * A short press toggles play/pause.
+   * A short press toggles play/pause (about 0.4 s after release). 2 quick presses = next track, 3 = previous.
    * Hold for 2 s: "Goodbye!" appears, the phone pauses, the link drops, and once you let go the panel goes off.
    * Press again: it boots, reconnects to the phone, and that wake press does **not** toggle play/pause.
    * With a multimeter in series with the battery, compare current while asleep and while awake (see the note on sleep current below).
