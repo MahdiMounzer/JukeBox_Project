@@ -72,7 +72,14 @@ static const uint16_t TOUCH_CAL_DATA[5] = { 0, 0, 0, 0, 0 };
 // 0 = no touch: no calibration at start-up, no on-screen buttons; the
 //     player shows the track and volume in a bigger layout, and the
 //     physical button + the phone do everything.
-#define USE_TOUCH 0
+#define USE_TOUCH 1
+
+// 1 = holding the button while switching on opens the calibration
+//     (and, with touch off, the touch readings).
+// 0 = never: a calibration once saved is kept for good. Calibration then
+//     only runs when there is none yet (first start, rotation changed,
+//     flash erased). Set back to 1 and upload to recalibrate.
+#define ALLOW_RECALIBRATION 0
 
 // What to do with the panel before deep sleep.
 //   1 = DISPOFF (0x28) + SLPIN (0x10), as specified. Lowest panel current,
@@ -1252,7 +1259,7 @@ void setup() {
   // Skipping (button) keeps any older calibration; with none at all the
   // jukebox still starts, touch is just ignored.
   bool haveCal = USE_TOUCH && loadTouchCal();
-  const bool forced = !wokeByButton && g_btn.stable == LOW;
+  const bool forced = ALLOW_RECALIBRATION && !wokeByButton && g_btn.stable == LOW;
   if (USE_TOUCH && (!haveCal || forced)) {
     if (runTouchCalibration(!forced)) haveCal = true;
     g_btn.stable = g_btn.lastRaw = digitalRead(PIN_BUTTON);
