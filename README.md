@@ -38,9 +38,7 @@ Open `Jukebox/Jukebox.ino` (the folder name has to match the sketch name) and up
 
 ## 2. Touch calibration and the hidden 2 mm strip
 
-> **`ALLOW_RECALIBRATION`** (in `Jukebox.ino`) is `0` by default: holding the button at power-on does nothing special, and a saved calibration is kept for good. Set it to `1` and upload to use the steps below again.
->
-> **With touch switched off** (`#define USE_TOUCH 0` in `Jukebox.ino`): no calibration at start-up and no on-screen buttons. The physical button does everything: **1 press = play/pause, 2 quick presses = next track, 3 = previous, hold 2 s = sleep**. Volume comes from the phone. Set it to `1` to bring the touch screen back; this section then applies.
+> **Touch is currently switched off** (`#define USE_TOUCH 0` in `Jukebox.ino`): no calibration at start-up and no on-screen buttons. The physical button does everything: **1 press = play/pause, 2 quick presses = next track, 3 = previous, hold 2 s = sleep**. Volume comes from the phone. Set it to `1` to bring the touch screen back; this section then applies.
 >
 > Even with touch off, **holding the button at power-on** shows the edge ruler with two lines of live touch readings, then the button leaves it. With a weak pull-down on MISO during that screen: `lib` = read through TFT_eSPI, `own` = read by the sketch itself at 1 MHz. Both stuck at the maximum (8191 / 4095) = MISO isn't being read; both at 0 = nothing answers on MISO (touch chip side: T_CS, T_CLK, T_DIN, T_DO).
 
