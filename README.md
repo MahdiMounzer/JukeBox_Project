@@ -129,7 +129,7 @@ Keep Serial Monitor open at 115200 for every step.
 | Brown-out reset when music starts | `Brownout detector was triggered` on Serial means the supply dips when the radio and amps start. Same fix as crackling: supply side. |
 | Upload fails "Wrong boot mode" | Hold BOOT while uploading. GPIO 2 (TFT_DC) is a strapping pin, and on some boards the display pulls it during reset. |
 
-**Sleep current, honestly:** the ESP32 itself drops to about 10 µA, but the backlight is wired straight to 3V3, the amps and boost converter stay powered, and the DevKit's regulator and USB chip draw a few mA. "Sleep" here mostly means "quiet and off-looking". Expect a few tens of mA, so a few days on a charge, not months. The only way to get real "off" is a power switch in the battery line.
+**Sleep current, honestly:** the ESP32 itself drops to about 10 µA, but the backlight is wired straight to 3V3, the amps and boost converter stay powered, and the DevKit's regulator and USB chip draw a few mA. "Sleep" here mostly means "quiet and off-looking". Expect a few tens of mA, so a few days on a charge, not months. That's why the jukebox has a **power switch** (latching, 3 A) between the TP4056's OUT+ and the boost converter's IN+: switched off, nothing draws from the battery, and charging through the TP4056 still works. Switching on restarts the ESP32, which reconnects to the last phone by itself.
 
 ## 5. How the firmware works
 
